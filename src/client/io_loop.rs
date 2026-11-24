@@ -379,9 +379,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                 log::info!("Peer stopped answering, reconnecting");
                                 #[cfg(feature = "flutter")]
                                 self.handler.msgbox("restarting-show", "Connecting...", "Connection in progress. Please wait.", "");
-                                // Sciter knows no `restarting-show` and would show a dialog that
-                                // waits for a click, where the timeout this arrives ahead of is
-                                // retryable and reconnects on its own. Keep that message for it.
+                                // Keep Sciter's existing transport-timeout retry and message.
                                 #[cfg(not(feature = "flutter"))]
                                 self.handler.msgbox("error", "Connection Error", "Timeout", "");
                                 break;
@@ -2354,6 +2352,14 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                     }
                     Some(misc::Union::CloseReason(c)) => {
+                        let handover = self.handler.lc.write().unwrap().handle_session_handover(&c);
+                        if handover {
+                            // Acknowledge before reconnecting so the service can stop the old
+                            // server without losing its last packet on buffered transports.
+                            allow_err!(timeout(1000, self.send_close_reason(peer, &c)).await);
+                            self.handler.msgbox("restarting", "Restarting remote device", "Connection in progress. Please wait.", "");
+                            return false;
+                        }
                         self.sent_close_reason = true; // The controlled end will close, no need to send close reason
                         self.handler.msgbox("error", "Connection Error", &c, "");
                         return false;
