@@ -2361,10 +2361,31 @@ DP-0 disconnected (normal left inverted right x axis y axis)
         assert!(caps["resolutions"].contains(" 1280x720 "));
         assert!(caps["resolutions"].contains(" 640x480 "));
     }
+
+    #[test]
+    fn change_resolution_directly_reaps_xrandr() {
+        // An unknown output changes no display, and xrandr exits with or without an X server.
+        if change_resolution_directly("rustdesk-no-such-output", 1, 1).is_err() {
+            return; // xrandr is not installed
+        }
+        let pid = hbb_common::sysinfo::Pid::from_u32(std::process::id());
+        let has_xrandr_child = || {
+            let mut sys = hbb_common::sysinfo::System::new();
+            sys.refresh_processes();
+            sys.processes()
+                .values()
+                .any(|p| p.parent() == Some(pid) && p.name() == "xrandr")
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while has_xrandr_child() {
+            assert!(Instant::now() < deadline, "xrandr was not reaped");
+            sleep_millis(50);
+        }
+    }
 }
 
 pub fn change_resolution_directly(name: &str, width: usize, height: usize) -> ResultType<()> {
-    Command::new("xrandr")
+    let mut child = Command::new("xrandr")
         .args(vec![
             "--output",
             name,
@@ -2372,6 +2393,26 @@ pub fn change_resolution_directly(name: &str, width: usize, height: usize) -> Re
             &format!("{}x{}", width, height),
         ])
         .spawn()?;
+    // Reap on a separate thread: callers run on async workers and must not wait for xrandr.
+    let name = name.to_owned();
+    std::thread::spawn(move || match child.wait() {
+        Ok(status) if status.success() => {}
+        Ok(status) => hbb_common::throttled_log!(
+            Duration::from_secs(5),
+            error,
+            "Failed to change resolution of '{}' to {}x{}, xrandr exited with {}",
+            name,
+            width,
+            height,
+            status
+        ),
+        Err(e) => hbb_common::throttled_log!(
+            Duration::from_secs(5),
+            error,
+            "Failed to wait for xrandr: {}",
+            e
+        ),
+    });
     Ok(())
 }
 
